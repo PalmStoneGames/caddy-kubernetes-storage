@@ -5,19 +5,19 @@
 package caddyKubernetesStorage
 
 import (
-	"os"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"time"
 	"net/url"
+	"os"
+	"time"
 
 	"github.com/mholt/caddy/caddytls"
 	k8sApi "k8s.io/kubernetes/pkg/api"
 	k8sApiErrors "k8s.io/kubernetes/pkg/api/errors"
 	k8sRest "k8s.io/kubernetes/pkg/client/restclient"
 	k8s "k8s.io/kubernetes/pkg/client/unversioned"
-	"encoding/json"
 )
 
 // Keys and key prefixes for various things
@@ -101,7 +101,7 @@ func NewStorageWithConfig(namespace string, conf *k8sRest.Config) (*Storage, err
 	}
 
 	return &Storage{
-		c: c,
+		c:         c,
 		namespace: namespace,
 	}, nil
 }
