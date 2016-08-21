@@ -2,19 +2,22 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-package caddy_k8s_storage
+package caddyKubernetesStorage
 
 import (
+	"os"
 	"encoding/base64"
 	"fmt"
 	"io/ioutil"
 	"time"
+	"net/url"
 
 	"github.com/mholt/caddy/caddytls"
 	k8sApi "k8s.io/kubernetes/pkg/api"
 	k8sApiErrors "k8s.io/kubernetes/pkg/api/errors"
+	k8sRest "k8s.io/kubernetes/pkg/client/restclient"
 	k8s "k8s.io/kubernetes/pkg/client/unversioned"
-	"net/url"
+	"encoding/json"
 )
 
 // Keys and key prefixes for various things
@@ -31,15 +34,45 @@ const (
 const lockTimeOut = time.Minute
 
 func init() {
-	caddytls.RegisterStorageProvider("kubernetes", func(caURL *url.URL) (caddytls.Storage, error) { return NewKubernetesStorage() })
+	caddytls.RegisterStorageProvider("kubernetes", func(caURL *url.URL) (caddytls.Storage, error) { return NewStorageAuto() })
 }
 
-type KubernetesStorage struct {
+// Storage represents a caddy kubernetes storage
+// NewStorage() should be used to initialize
+type Storage struct {
 	c         *k8s.Client
 	namespace string
 }
 
-func NewKubernetesStorage() (*KubernetesStorage, error) {
+// NewStorageAuto attempts to determine whether to call NewStorageWithConfig or NewStorageInCluster
+// It will call NewStorageWithConfig if the following env vars are declared: CADDY_K8S_CONF_PATH, CADDY_K8S_NAMESPACE
+// Otherwise, it will call NewStorageInCluster
+func NewStorageAuto() (*Storage, error) {
+	confPath := os.Getenv("CADDY_K8S_CONF_PATH")
+	namespace := os.Getenv("CADDY_K8S_NAMESPACE")
+
+	if namespace != "" && confPath != "" {
+		f, err := os.Open(confPath)
+		if err != nil {
+			return nil, err
+		}
+
+		// Use a JSON decoder to decode the config from disk
+		// The config has some Go specific stuff that the json decoder won't ever be able to fill in
+		// But at least it does cover most of the fields
+		conf := k8sRest.Config{}
+		json.NewDecoder(f).Decode(&conf)
+
+		return NewStorageWithConfig(namespace, &conf)
+	}
+
+	return NewStorageInCluster()
+}
+
+// NewStorageInCluster will initialize a new Storage
+// Login credentials will be taken from the kubernetes pod
+// If not in a cluster, use NewStorageWithConfig
+func NewStorageInCluster() (*Storage, error) {
 	// Create a new inCluster config, this will automatically grab the serviceaccount info from /var/run/secrets/kubernetes.io/serviceaccount/
 	c, err := k8s.NewInCluster()
 	if err != nil {
@@ -52,16 +85,29 @@ func NewKubernetesStorage() (*KubernetesStorage, error) {
 		return nil, err
 	}
 
-	return &KubernetesStorage{
+	return &Storage{
 		c:         c,
 		namespace: string(namespace),
+	}, nil
+}
+
+// NewStorageWithConfig will initialize a new storage based on the passed config and namespace
+func NewStorageWithConfig(namespace string, conf *k8sRest.Config) (*Storage, error) {
+	c, err := k8s.New(conf)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Storage{
+		c: c,
+		namespace: namespace,
 	}, nil
 }
 
 // SiteExists returns true if this site exists in storage.
 // Site data is considered present when StoreSite has been called
 // successfully (without DeleteSite having been called, of course).
-func (k *KubernetesStorage) SiteExists(domain string) (bool, error) {
+func (k *Storage) SiteExists(domain string) (bool, error) {
 	_, err := k.c.Secrets(k.namespace).Get(keyPrefixDomain + domain)
 	if err == nil {
 		return true, nil
@@ -77,7 +123,7 @@ func (k *KubernetesStorage) SiteExists(domain string) (bool, error) {
 // ErrStorageNotFound error instance is returned. For multi-server
 // storage, care should be taken to make this load atomic to prevent
 // race conditions that happen with multiple data loads.
-func (k *KubernetesStorage) LoadSite(domain string) (*caddytls.SiteData, error) {
+func (k *Storage) LoadSite(domain string) (*caddytls.SiteData, error) {
 	s, err := k.c.Secrets(k.namespace).Get(keyPrefixDomain + domain)
 	if k8sApiErrors.IsNotFound(err) {
 		return nil, caddytls.ErrStorageNotFound
@@ -98,7 +144,7 @@ func (k *KubernetesStorage) LoadSite(domain string) (*caddytls.SiteData, error) 
 // intermediate storage step. Implementers can trust that at runtime
 // this function will only be invoked after LockRegister and before
 // UnlockRegister of the same domain.
-func (k *KubernetesStorage) StoreSite(domain string, data *caddytls.SiteData) error {
+func (k *Storage) StoreSite(domain string, data *caddytls.SiteData) error {
 	// StoreSite assumes that we can safely Get and Update, this is because LockRegister takes care of creating the key if necessary
 	// This keeps StoreSite simpler
 	// Kubernetes uses a ResourceVersion on the secret to keep track of any concurrent changes and will error if there are any
@@ -123,13 +169,13 @@ func (k *KubernetesStorage) StoreSite(domain string, data *caddytls.SiteData) er
 // Multi-server implementations should attempt to make this atomic. If
 // the site does not exist, the ErrStorageNotFound error instance is
 // returned.
-func (k *KubernetesStorage) DeleteSite(domain string) error {
+func (k *Storage) DeleteSite(domain string) error {
 	err := k.c.Secrets(k.namespace).Delete(keyPrefixDomain + domain)
 	if k8sApiErrors.IsNotFound(err) {
 		return caddytls.ErrStorageNotFound
-	} else {
-		return err
 	}
+
+	return err
 }
 
 // LockRegister is called before Caddy attempts to obtain or renew a
@@ -144,7 +190,7 @@ func (k *KubernetesStorage) DeleteSite(domain string) error {
 // reasonable expiration on this lock in case UnlockRegister is unable to
 // be called due to system crash. Errors should only be returned in
 // exceptional cases. Any error will prevent renewal.
-func (k *KubernetesStorage) LockRegister(domain string) (bool, error) {
+func (k *Storage) LockRegister(domain string) (bool, error) {
 	key := keyPrefixDomain + domain
 	handle := k.c.Secrets(k.namespace)
 	s, err := handle.Get(key)
@@ -224,7 +270,7 @@ func (k *KubernetesStorage) LockRegister(domain string) (bool, error) {
 // attempt to unlock the lock obtained in this process by LockRegister.
 // If no lock exists, the implementation should not return an error. An
 // error is only for exceptional cases.
-func (k *KubernetesStorage) UnlockRegister(domain string) error {
+func (k *Storage) UnlockRegister(domain string) error {
 	key := keyPrefixDomain + domain
 	handle := k.c.Secrets(k.namespace)
 	s, err := handle.Get(key)
@@ -244,7 +290,7 @@ func (k *KubernetesStorage) UnlockRegister(domain string) error {
 // ErrStorageNotFound error instance is returned. Multi-server
 // implementations should take care to make this operation atomic for
 // all loaded data items.
-func (k *KubernetesStorage) LoadUser(email string) (*caddytls.UserData, error) {
+func (k *Storage) LoadUser(email string) (*caddytls.UserData, error) {
 	s, err := k.c.Secrets(k.namespace).Get(keyPrefixUser + base64.URLEncoding.EncodeToString([]byte(email)))
 	if k8sApiErrors.IsNotFound(err) {
 		return nil, caddytls.ErrStorageNotFound
@@ -261,7 +307,7 @@ func (k *KubernetesStorage) LoadUser(email string) (*caddytls.UserData, error) {
 // StoreUser persists the given user data for the given email in
 // storage. Multi-server implementations should take care to make this
 // operation atomic for all stored data items.
-func (k *KubernetesStorage) StoreUser(email string, data *caddytls.UserData) error {
+func (k *Storage) StoreUser(email string, data *caddytls.UserData) error {
 	key := keyPrefixUser + base64.URLEncoding.EncodeToString([]byte(email))
 	handle := k.c.Secrets(k.namespace)
 	s, err := handle.Get(key)
@@ -301,7 +347,7 @@ func (k *KubernetesStorage) StoreUser(email string, data *caddytls.UserData) err
 	return k.storeRecentUserEmail(email)
 }
 
-func (k *KubernetesStorage) storeRecentUserEmail(email string) error {
+func (k *Storage) storeRecentUserEmail(email string) error {
 	handle := k.c.Secrets(k.namespace)
 	s, err := handle.Get(keyGlobal)
 	errIsNotFound := k8sApiErrors.IsNotFound(err)
@@ -330,7 +376,7 @@ func (k *KubernetesStorage) storeRecentUserEmail(email string) error {
 // MostRecentUserEmail provides the most recently used email parameter
 // in StoreUser. The result is an empty string if there are no
 // persisted users in storage.
-func (k *KubernetesStorage) MostRecentUserEmail() string {
+func (k *Storage) MostRecentUserEmail() string {
 	s, err := k.c.Secrets(k.namespace).Get(keyGlobal)
 
 	if err != nil {
