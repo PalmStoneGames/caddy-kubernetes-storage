@@ -61,7 +61,9 @@ func NewStorageAuto() (*Storage, error) {
 		// The config has some Go specific stuff that the json decoder won't ever be able to fill in
 		// But at least it does cover most of the fields
 		conf := k8sRest.Config{}
-		json.NewDecoder(f).Decode(&conf)
+		if err := json.NewDecoder(f).Decode(&conf); err != nil {
+			return nil, err
+		}
 
 		return NewStorageWithConfig(namespace, &conf)
 	}
