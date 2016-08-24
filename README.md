@@ -22,6 +22,15 @@ The naming scheme for the secrets looks as follows:
 - User specific data: `caddy-user-[base64 url-encoded email]`
 - Global data: `caddy-global`
 
+Installation
+------------
+You should vendor the `k8s.io/kubernetes` repository in your own code, and use the correct `release-1.x` branch that corresponds with the version of kubernetes that you use.
+This is because the master branch of `k8s.io/kubernetes` is meant for the in development version of kubernetes, which your cluster is probably not running, and often does not compile.
+
+This code is tested with the latest release branch of kubernetes, currently that is `release-1.3`
+
+Once you have the correct version of kubernetes vendored, you can just run `go get github.com/PalmStoneGames/caddy-kubernetes-storage/...`
+
 License
 -------
 This Source Code Form is subject to the terms of the Mozilla Public

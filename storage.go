@@ -31,22 +31,22 @@ const (
 	userKeyKey        = "key"
 	globalKeyEmail    = "email"
 )
-const lockTimeOut = time.Minute
+const lockTimeOut = 2*time.Minute
 
 func init() {
 	caddytls.RegisterStorageProvider("kubernetes", func(caURL *url.URL) (caddytls.Storage, error) { return NewStorageAuto() })
 }
 
-// Storage represents a caddy kubernetes storage
-// NewStorage() should be used to initialize
+// Storage represents a caddy kubernetes storage.
+// Use one of NewStorageAuto, NewStorageInCluster or NewStorageWithConfig to initialize.
 type Storage struct {
 	c         *k8s.Client
 	namespace string
 }
 
-// NewStorageAuto attempts to determine whether to call NewStorageWithConfig or NewStorageInCluster
+// NewStorageAuto attempts to determine whether to call NewStorageWithConfig or NewStorageInCluster.
 // It will call NewStorageWithConfig if the following env vars are declared: CADDY_K8S_CONF_PATH, CADDY_K8S_NAMESPACE
-// Otherwise, it will call NewStorageInCluster
+// Otherwise, it will call NewStorageInCluster.
 func NewStorageAuto() (*Storage, error) {
 	confPath := os.Getenv("CADDY_K8S_CONF_PATH")
 	namespace := os.Getenv("CADDY_K8S_NAMESPACE")
@@ -56,6 +56,7 @@ func NewStorageAuto() (*Storage, error) {
 		if err != nil {
 			return nil, err
 		}
+		defer f.Close()
 
 		// Use a JSON decoder to decode the config from disk
 		// The config has some Go specific stuff that the json decoder won't ever be able to fill in
@@ -71,9 +72,9 @@ func NewStorageAuto() (*Storage, error) {
 	return NewStorageInCluster()
 }
 
-// NewStorageInCluster will initialize a new Storage
-// Login credentials will be taken from the kubernetes pod
-// If not in a cluster, use NewStorageWithConfig
+// NewStorageInCluster will initialize a new Storage.
+// Login credentials will be taken from the kubernetes pod.
+// If not in a cluster, use NewStorageWithConfig.
 func NewStorageInCluster() (*Storage, error) {
 	// Create a new inCluster config, this will automatically grab the serviceaccount info from /var/run/secrets/kubernetes.io/serviceaccount/
 	c, err := k8s.NewInCluster()
@@ -93,7 +94,7 @@ func NewStorageInCluster() (*Storage, error) {
 	}, nil
 }
 
-// NewStorageWithConfig will initialize a new storage based on the passed config and namespace
+// NewStorageWithConfig will initialize a new storage based on the passed config and namespace.
 func NewStorageWithConfig(namespace string, conf *k8sRest.Config) (*Storage, error) {
 	c, err := k8s.New(conf)
 	if err != nil {
@@ -122,8 +123,8 @@ func (k *Storage) SiteExists(domain string) (bool, error) {
 
 // LoadSite obtains the site data from storage for the given domain and
 // returns it. If data for the domain does not exist, the
-// ErrStorageNotFound error instance is returned. For multi-server
-// storage, care should be taken to make this load atomic to prevent
+// ErrStorageNotFound error instance is returned.
+// care has been taken to make this load atomic to prevent
 // race conditions that happen with multiple data loads.
 func (k *Storage) LoadSite(domain string) (*caddytls.SiteData, error) {
 	s, err := k.c.Secrets(k.namespace).Get(keyPrefixDomain + domain)
@@ -141,11 +142,10 @@ func (k *Storage) LoadSite(domain string) (*caddytls.SiteData, error) {
 }
 
 // StoreSite persists the given site data for the given domain in
-// storage. For multi-server storage, care should be taken to make this
-// call atomic to prevent half-written data on failure of an internal
-// intermediate storage step. Implementers can trust that at runtime
-// this function will only be invoked after LockRegister and before
-// UnlockRegister of the same domain.
+// storage. Care has been taken to make this call atomic to prevent
+// half-written data on failure of an internal intermediate storage
+// step. this function should only be invoked after LockRegister
+// and before UnlockRegister of the same domain.
 func (k *Storage) StoreSite(domain string, data *caddytls.SiteData) error {
 	// StoreSite assumes that we can safely Get and Update, this is because LockRegister takes care of creating the key if necessary
 	// This keeps StoreSite simpler
@@ -168,8 +168,7 @@ func (k *Storage) StoreSite(domain string, data *caddytls.SiteData) error {
 }
 
 // DeleteSite deletes the site for the given domain from storage.
-// Multi-server implementations should attempt to make this atomic. If
-// the site does not exist, the ErrStorageNotFound error instance is
+// If the site does not exist, the ErrStorageNotFound error instance is
 // returned.
 func (k *Storage) DeleteSite(domain string) error {
 	err := k.c.Secrets(k.namespace).Delete(keyPrefixDomain + domain)
@@ -180,18 +179,14 @@ func (k *Storage) DeleteSite(domain string) error {
 	return err
 }
 
-// LockRegister is called before Caddy attempts to obtain or renew a
+// LockRegister should called before the caller attempts to obtain or renew a
 // certificate. This function is used as a mutex/semaphore for making
-// sure something else isn't already attempting obtain/renew. It should
+// sure something else isn't already attempting obtain/renew. It will
 // return true (without error) if the lock is successfully obtained
-// meaning nothing else is attempting renewal. It should return false
+// meaning nothing else is attempting renewal. It will return false
 // (without error) if this domain is already locked by something else
-// attempting renewal. As a general rule, if this isn't multi-server
-// shared storage, this should always return true. To prevent deadlocks
-// for multi-server storage, all internal implementations should put a
-// reasonable expiration on this lock in case UnlockRegister is unable to
-// be called due to system crash. Errors should only be returned in
-// exceptional cases. Any error will prevent renewal.
+// attempting renewal. To prevent deadlocks, the lock has a timeout of two minutes.
+// Errors are only returned in exceptional cases.
 func (k *Storage) LockRegister(domain string) (bool, error) {
 	key := keyPrefixDomain + domain
 	handle := k.c.Secrets(k.namespace)
@@ -265,13 +260,11 @@ func (k *Storage) LockRegister(domain string) (bool, error) {
 	return true, nil
 }
 
-// UnlockRegister is called after Caddy has attempted to obtain or renew
-// a certificate, regardless of whether it was successful. If
-// LockRegister essentially just returns true because this is not
-// multi-server storage, this can be a no-op. Otherwise this should
+// UnlockRegister should be called after the caller has attempted to obtain or renew
+// a certificate, regardless of whether it was successful. This will
 // attempt to unlock the lock obtained in this process by LockRegister.
-// If no lock exists, the implementation should not return an error. An
-// error is only for exceptional cases.
+// If no lock exists, the implementation will not return an error.
+// Errors are only returned in exceptional cases.
 func (k *Storage) UnlockRegister(domain string) error {
 	key := keyPrefixDomain + domain
 	handle := k.c.Secrets(k.namespace)
@@ -307,8 +300,8 @@ func (k *Storage) LoadUser(email string) (*caddytls.UserData, error) {
 }
 
 // StoreUser persists the given user data for the given email in
-// storage. Multi-server implementations should take care to make this
-// operation atomic for all stored data items.
+// storage. Care has been taken to make this operation atomic
+// for all stored data items.
 func (k *Storage) StoreUser(email string, data *caddytls.UserData) error {
 	key := keyPrefixUser + base64.URLEncoding.EncodeToString([]byte(email))
 	handle := k.c.Secrets(k.namespace)
