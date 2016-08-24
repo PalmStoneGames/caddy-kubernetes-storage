@@ -19,7 +19,7 @@ The plugin will create kubernetes secrets to store TLS certificates, user data a
 The naming scheme for the secrets looks as follows:
 
 - Domain specific data: `caddy-domain-[domain name]`
-- User specific data: `caddy-user-[base64 url-encoded email]`
+- User specific data: `caddy-user-[base32 hex-encoded email]`
 - Global data: `caddy-global`
 
 Installation
