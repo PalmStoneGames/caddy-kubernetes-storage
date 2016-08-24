@@ -5,13 +5,14 @@
 package caddyKubernetesStorage
 
 import (
-	"encoding/base64"
+	"encoding/base32"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/url"
 	"os"
 	"time"
+	"strings"
 
 	"github.com/mholt/caddy/caddytls"
 	k8sApi "k8s.io/kubernetes/pkg/api"
@@ -111,9 +112,11 @@ func NewStorageWithConfig(namespace string, conf *k8sRest.Config) (*Storage, err
 // Site data is considered present when StoreSite has been called
 // successfully (without DeleteSite having been called, of course).
 func (k *Storage) SiteExists(domain string) (bool, error) {
-	_, err := k.c.Secrets(k.namespace).Get(keyPrefixDomain + domain)
+	s, err := k.c.Secrets(k.namespace).Get(keyPrefixDomain + domain)
 	if err == nil {
-		return true, nil
+		_, okCert := s.Data[k8sApi.TLSCertKey]
+		_, okKey := s.Data[k8sApi.TLSPrivateKeyKey]
+		return okCert && okKey, nil
 	} else if k8sApiErrors.IsNotFound(err) {
 		return false, nil
 	} else {
@@ -134,9 +137,16 @@ func (k *Storage) LoadSite(domain string) (*caddytls.SiteData, error) {
 		return nil, err
 	}
 
+	cert, certOk := s.Data[k8sApi.TLSCertKey]
+	key, keyOk := s.Data[k8sApi.TLSPrivateKeyKey]
+
+	if !certOk || !keyOk {
+		return nil, caddytls.ErrStorageNotFound
+	}
+
 	return &caddytls.SiteData{
-		Cert: s.Data[k8sApi.TLSCertKey],
-		Key:  s.Data[k8sApi.TLSPrivateKeyKey],
+		Cert: cert,
+		Key:  key,
 		Meta: s.Data[domainKeyMetadata],
 	}, nil
 }
@@ -197,10 +207,15 @@ func (k *Storage) LockRegister(domain string) (bool, error) {
 	}
 
 	if errIsNotFound {
+		t, err := time.Now().MarshalText()
+		if err != nil {
+			return false, err
+		}
+
 		// Handle creation
-		_, err := handle.Create(&k8sApi.Secret{
+		_, err = handle.Create(&k8sApi.Secret{
 			ObjectMeta: k8sApi.ObjectMeta{Name: key},
-			Data:       map[string][]byte{domainKeyLock: []byte(time.Now().String())},
+			Data:       map[string][]byte{domainKeyLock: []byte(t)},
 			Type:       k8sApi.SecretTypeOpaque,
 		})
 
@@ -227,6 +242,10 @@ func (k *Storage) LockRegister(domain string) (bool, error) {
 	}
 
 	// Handle update
+	if s.Data == nil {
+		s.Data = make(map[string][]byte)
+	}
+
 	lockData, isLocked := s.Data[domainKeyLock]
 	if isLocked {
 		t := new(time.Time)
@@ -286,7 +305,7 @@ func (k *Storage) UnlockRegister(domain string) error {
 // implementations should take care to make this operation atomic for
 // all loaded data items.
 func (k *Storage) LoadUser(email string) (*caddytls.UserData, error) {
-	s, err := k.c.Secrets(k.namespace).Get(keyPrefixUser + base64.URLEncoding.EncodeToString([]byte(email)))
+	s, err := k.c.Secrets(k.namespace).Get(keyPrefixUser + strings.ToLower(strings.TrimRight(base32.HexEncoding.EncodeToString([]byte(email)), "=")))
 	if k8sApiErrors.IsNotFound(err) {
 		return nil, caddytls.ErrStorageNotFound
 	} else if err != nil {
@@ -303,7 +322,7 @@ func (k *Storage) LoadUser(email string) (*caddytls.UserData, error) {
 // storage. Care has been taken to make this operation atomic
 // for all stored data items.
 func (k *Storage) StoreUser(email string, data *caddytls.UserData) error {
-	key := keyPrefixUser + base64.URLEncoding.EncodeToString([]byte(email))
+	key := keyPrefixUser + strings.ToLower(strings.TrimRight(base32.HexEncoding.EncodeToString([]byte(email)), "="))
 	handle := k.c.Secrets(k.namespace)
 	s, err := handle.Get(key)
 	errIsNotFound := k8sApiErrors.IsNotFound(err)
