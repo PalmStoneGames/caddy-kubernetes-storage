@@ -189,7 +189,7 @@ func (k *Storage) DeleteSite(domain string) error {
 	return err
 }
 
-// LockRegister should called before the caller attempts to obtain or renew a
+// LockRegister should be called before the caller attempts to obtain or renew a
 // certificate. This function is used as a mutex/semaphore for making
 // sure something else isn't already attempting obtain/renew. It will
 // return true (without error) if the lock is successfully obtained
@@ -305,7 +305,7 @@ func (k *Storage) UnlockRegister(domain string) error {
 // implementations should take care to make this operation atomic for
 // all loaded data items.
 func (k *Storage) LoadUser(email string) (*caddytls.UserData, error) {
-	s, err := k.c.Secrets(k.namespace).Get(keyPrefixUser + strings.ToLower(strings.TrimRight(base32.HexEncoding.EncodeToString([]byte(email)), "=")))
+	s, err := k.c.Secrets(k.namespace).Get(k.emailToKey(email))
 	if k8sApiErrors.IsNotFound(err) {
 		return nil, caddytls.ErrStorageNotFound
 	} else if err != nil {
@@ -322,7 +322,7 @@ func (k *Storage) LoadUser(email string) (*caddytls.UserData, error) {
 // storage. Care has been taken to make this operation atomic
 // for all stored data items.
 func (k *Storage) StoreUser(email string, data *caddytls.UserData) error {
-	key := keyPrefixUser + strings.ToLower(strings.TrimRight(base32.HexEncoding.EncodeToString([]byte(email)), "="))
+	key := k.emailToKey(email)
 	handle := k.c.Secrets(k.namespace)
 	s, err := handle.Get(key)
 	errIsNotFound := k8sApiErrors.IsNotFound(err)
@@ -359,6 +359,10 @@ func (k *Storage) StoreUser(email string, data *caddytls.UserData) error {
 	}
 
 	return k.storeRecentUserEmail(email)
+}
+
+func (k *Storage) emailToKey(email string) string {
+	return keyPrefixUser + strings.ToLower(strings.TrimRight(base32.HexEncoding.EncodeToString([]byte(email)), "="))
 }
 
 func (k *Storage) storeRecentUserEmail(email string) error {
